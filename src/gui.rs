@@ -589,7 +589,7 @@ impl App {
                     );
                     if control {
                         ui.label(
-                            RichText::new("Miš i tastatura u prozoru sa ekranom upravljaju drugim računarom.")
+                            RichText::new("Miš i tastatura u prozoru sa ekranom upravljaju drugim računarom. F11: ceo ekran (ponovo F11 za izlaz).")
                                 .size(12.5)
                                 .color(MUTED),
                         );

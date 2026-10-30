@@ -52,6 +52,7 @@ Prozor hosta iskoči sa pitanjem. Izaberi:
 
 Viewer otvara prozor sa ekranom hosta. Miš i tastatura u tom prozoru upravljaju hostom.
 
+- **Ceo ekran na viewer-u:** `F11` u prozoru sa ekranom hosta (ponovo `F11` za izlaz). Slika zadržava proporcije (crne trake ako se razlikuju), a F11 se ne šalje hostu.
 - **Hitni prekid kontrole na hostu:** `Ctrl+Alt+Shift+F12`
 - Prekid sa viewer strane: dugme **Prekini**, ili zatvori prozor sa ekranom
 - Prekid sa host strane: dugme **Zaustavi hosting**

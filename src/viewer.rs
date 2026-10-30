@@ -6,6 +6,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -19,10 +20,21 @@ pub struct Viewer {
     video_context: ID3D11VideoContext,
     enumerator: ID3D11VideoProcessorEnumerator,
     processor: ID3D11VideoProcessor,
+    hwnd: HWND,
+    src_w: u32,
+    src_h: u32,
+    /// Current client-area size (the swap chain has the same size).
     width: u32,
     height: u32,
+    /// Where the remote screen is drawn inside the client area (letterboxed when the aspect ratios differ).
+    dest: RECT,
+    saved_rect: RECT,
+    fullscreen: bool,
     pub screenshot: Option<String>,
 }
+
+const WINDOWED_STYLE: WINDOW_STYLE = WINDOW_STYLE(WS_OVERLAPPED.0 | WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
+const VK_F11: usize = 0x7A;
 
 /// Input seen by the window, in client-area pixels; turned into protocol events by the client.
 #[derive(Clone, Copy, Debug)]
@@ -38,6 +50,7 @@ pub enum RawInput {
 thread_local! {
     // The window procedure runs on the thread that pumps messages, so a thread-local queue is enough.
     static INPUT_QUEUE: std::cell::RefCell<Vec<RawInput>> = const { std::cell::RefCell::new(Vec::new()) };
+    static FULLSCREEN_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn queue(input: RawInput) {
@@ -90,6 +103,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
+                if wp.0 == VK_F11 {
+                    // F11 belongs to this window (full screen on/off) and is not sent to the remote machine.
+                    if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && (lp.0 >> 30) & 1 == 0 {
+                        FULLSCREEN_REQUEST.with(|f| f.set(true));
+                    }
+                    return LRESULT(0);
+                }
                 queue(RawInput::Key {
                     scan: ((lp.0 >> 16) & 0xFF) as u16,
                     extended: (lp.0 >> 24) & 1 != 0,
@@ -128,6 +148,76 @@ pub fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     }
 }
 
+/// Largest `src_w` x `src_h` rectangle that fits in `width` x `height`, centered, aspect ratio kept.
+fn fit(src_w: u32, src_h: u32, width: u32, height: u32) -> RECT {
+    let (dw, dh) = if width as u64 * src_h as u64 <= height as u64 * src_w as u64 {
+        (width, (width as u64 * src_h as u64 / src_w as u64) as u32)
+    } else {
+        ((height as u64 * src_w as u64 / src_h as u64) as u32, height)
+    };
+    let left = (width.saturating_sub(dw) / 2) as i32;
+    let top = (height.saturating_sub(dh) / 2) as i32;
+    RECT { left, top, right: left + dw as i32, bottom: top + dh as i32 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sz(r: RECT) -> (i32, i32, i32, i32) {
+        (r.left, r.top, r.right - r.left, r.bottom - r.top)
+    }
+
+    #[test]
+    fn same_aspect_fills_everything() {
+        assert_eq!(sz(fit(1920, 1080, 2560, 1440)), (0, 0, 2560, 1440));
+        assert_eq!(sz(fit(1920, 1080, 1280, 720)), (0, 0, 1280, 720));
+    }
+
+    #[test]
+    fn wider_screen_gets_side_bars() {
+        // 16:9 stream on a 21:9 monitor: bars left and right
+        assert_eq!(sz(fit(1920, 1080, 2560, 1080)), (320, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn taller_screen_gets_top_and_bottom_bars() {
+        // 16:9 stream on a 16:10 monitor: bars top and bottom
+        assert_eq!(sz(fit(1920, 1080, 1920, 1200)), (0, 60, 1920, 1080));
+    }
+}
+
+/// Video processor that draws the `src` stream into a `width` x `height` target, centered, aspect ratio kept.
+/// Returns the destination rectangle inside the target; the rest stays black.
+fn make_processor(
+    video_device: &ID3D11VideoDevice,
+    video_context: &ID3D11VideoContext,
+    src_w: u32,
+    src_h: u32,
+    width: u32,
+    height: u32,
+) -> Result<(ID3D11VideoProcessorEnumerator, ID3D11VideoProcessor, RECT)> {
+    unsafe {
+        let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputWidth: src_w,
+            InputHeight: src_h,
+            OutputWidth: width,
+            OutputHeight: height,
+            Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
+            ..Default::default()
+        };
+        let enumerator = video_device.CreateVideoProcessorEnumerator(&content)?;
+        let processor = video_device.CreateVideoProcessor(&enumerator, 0)?;
+
+        let dest = fit(src_w, src_h, width, height);
+        let target = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+        video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&target));
+        video_context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&dest));
+        Ok((enumerator, processor, dest))
+    }
+}
+
 impl Viewer {
     pub fn new(
         device: &ID3D11Device,
@@ -147,13 +237,13 @@ impl Viewer {
                 ..Default::default()
             };
             RegisterClassW(&class);
-            let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+            let style = WINDOWED_STYLE;
             let mut rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
             AdjustWindowRect(&mut rect, style, false)?;
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 w!("RemoteDeskViewer"),
-                w!("Remote Desk viewer"),
+                w!("Remote Desk viewer  (F11: ceo ekran)"),
                 style | WS_VISIBLE,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -184,17 +274,7 @@ impl Viewer {
 
             let video_device: ID3D11VideoDevice = device.cast()?;
             let video_context: ID3D11VideoContext = context.cast()?;
-            let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
-                InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-                InputWidth: src_w,
-                InputHeight: src_h,
-                OutputWidth: width,
-                OutputHeight: height,
-                Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
-                ..Default::default()
-            };
-            let enumerator = video_device.CreateVideoProcessorEnumerator(&content)?;
-            let processor = video_device.CreateVideoProcessor(&enumerator, 0)?;
+            let (enumerator, processor, dest) = make_processor(&video_device, &video_context, src_w, src_h, width, height)?;
 
             Ok(Self {
                 device: device.clone(),
@@ -204,10 +284,89 @@ impl Viewer {
                 video_context,
                 enumerator,
                 processor,
+                hwnd,
+                src_w,
+                src_h,
                 width,
                 height,
+                dest,
+                saved_rect: RECT::default(),
+                fullscreen: false,
                 screenshot: None,
             })
+        }
+    }
+
+    /// Where the remote screen is drawn, in client pixels: (x, y, width, height). Mouse input maps onto this.
+    pub fn content(&self) -> (i32, i32, u32, u32) {
+        let d = self.dest;
+        (d.left, d.top, (d.right - d.left) as u32, (d.bottom - d.top) as u32)
+    }
+
+    /// Applies a pending F11 press. Call once per loop iteration after `pump`.
+    pub fn handle_requests(&mut self) -> Result<()> {
+        if FULLSCREEN_REQUEST.with(|f| f.replace(false)) {
+            self.set_fullscreen(!self.fullscreen)?;
+        }
+        Ok(())
+    }
+
+    pub fn set_fullscreen(&mut self, on: bool) -> Result<()> {
+        if on == self.fullscreen {
+            return Ok(());
+        }
+        unsafe {
+            if on {
+                GetWindowRect(self.hwnd, &mut self.saved_rect)?;
+                let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+                let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+                anyhow::ensure!(GetMonitorInfoW(monitor, &mut info).as_bool(), "GetMonitorInfo failed");
+                let r = info.rcMonitor;
+                SetWindowLongW(self.hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as i32);
+                SetWindowPos(
+                    self.hwnd,
+                    Some(HWND_TOP),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                )?;
+            } else {
+                SetWindowLongW(self.hwnd, GWL_STYLE, (WINDOWED_STYLE | WS_VISIBLE).0 as i32);
+                let s = self.saved_rect;
+                SetWindowPos(
+                    self.hwnd,
+                    None,
+                    s.left,
+                    s.top,
+                    s.right - s.left,
+                    s.bottom - s.top,
+                    SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW,
+                )?;
+            }
+            self.fullscreen = on;
+            let mut client = RECT::default();
+            GetClientRect(self.hwnd, &mut client)?;
+            let (w, h) = ((client.right - client.left).max(1) as u32, (client.bottom - client.top).max(1) as u32);
+            self.resize(w, h)
+        }
+    }
+
+    /// New swap chain size and a video processor for it (the stream is scaled to fit, keeping its aspect ratio).
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        unsafe {
+            // No view of the old back buffer may be alive here (present() creates and drops its own).
+            self.context.Flush();
+            self.swapchain.ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING)?;
+            let (enumerator, processor, dest) =
+                make_processor(&self.video_device, &self.video_context, self.src_w, self.src_h, width, height)?;
+            self.enumerator = enumerator;
+            self.processor = processor;
+            self.dest = dest;
+            self.width = width;
+            self.height = height;
+            Ok(())
         }
     }
 

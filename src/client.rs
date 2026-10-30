@@ -25,12 +25,19 @@ fn normalize(x: i32, y: i32, w: u32, h: u32) -> (u16, u16) {
     (scale(x, w), scale(y, h))
 }
 
-fn translate(raw: viewer::RawInput, sender: &mut input::Sender, pending_move: &mut Option<(u16, u16)>, w: u32, h: u32) {
+/// `content` is where the remote screen sits in the window: (x, y, width, height), so black bars are ignored.
+fn translate(
+    raw: viewer::RawInput,
+    sender: &mut input::Sender,
+    pending_move: &mut Option<(u16, u16)>,
+    content: (i32, i32, u32, u32),
+) {
     use viewer::RawInput::*;
+    let (ox, oy, w, h) = content;
     match raw {
-        Move { x, y } => *pending_move = Some(normalize(x, y, w, h)),
+        Move { x, y } => *pending_move = Some(normalize(x - ox, y - oy, w, h)),
         Button { button, down, x, y } => {
-            let (nx, ny) = normalize(x, y, w, h);
+            let (nx, ny) = normalize(x - ox, y - oy, w, h);
             sender.push(if down { proto::ev::BUTTON_DOWN } else { proto::ev::BUTTON_UP }, 0, button as i16, nx, ny);
         }
         Key { scan, extended, down } => {
@@ -270,6 +277,7 @@ pub fn run(host: SocketAddr, opts: Options, cancel: &AtomicBool) -> Result<()> {
         && deadline.is_none_or(|d| started.elapsed() < d)
     {
         // --- remote control: window input (or the test script) -> protocol events
+        window.handle_requests()?;
         let mut raw_input = window.take_input();
         while script_next < script.len() && session_start.elapsed() >= script[script_next].0 {
             raw_input.push(script[script_next].1);
@@ -277,8 +285,9 @@ pub fn run(host: SocketAddr, opts: Options, cancel: &AtomicBool) -> Result<()> {
         }
         if info.control {
             let mut pending_move = None;
+            let content = window.content();
             for raw in raw_input {
-                translate(raw, &mut sender, &mut pending_move, win_w, win_h);
+                translate(raw, &mut sender, &mut pending_move, content);
             }
             if let Some((x, y)) = pending_move {
                 sender.send_move(&sock, x, y);
