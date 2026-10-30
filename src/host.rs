@@ -1,5 +1,7 @@
 //! Host side: waits for a viewer, asks the local user for consent, then streams the screen.
 
+use crate::log::{console, say};
+use crate::status::{self, HostStatus};
 use crate::{capture, encoder, input, proto};
 use anyhow::Result;
 use std::net::{SocketAddr, UdpSocket};
@@ -23,19 +25,30 @@ struct Shared {
 }
 
 /// What the local user allows a viewer to do.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Permission {
     Deny,
     ViewOnly,
     Control,
 }
 
-/// `auto` answers the consent question without asking (tests only).
-pub fn run(port: u16, auto: Option<Permission>) -> Result<()> {
-    let sock = proto::bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
-    println!("Host listening on UDP port {port}. Waiting for a viewer...");
+/// Listen on `port` until `stop` is set. Every incoming viewer is put to `ask`, which decides what it may do.
+/// `ask` runs on this thread and may block (the GUI shows a dialog); it should return `Deny` once `stop` is set.
+pub fn run(port: u16, mut ask: impl FnMut(SocketAddr) -> Permission, stop: &AtomicBool) -> Result<()> {
+    let result = listen(port, &mut ask, stop);
+    status::set_host(HostStatus::Off);
+    result
+}
+
+fn listen(port: u16, ask: &mut dyn FnMut(SocketAddr) -> Permission, stop: &AtomicBool) -> Result<()> {
+    let sock = proto::bind(SocketAddr::from(([0, 0, 0, 0], port)))
+        .map_err(|e| anyhow::anyhow!("ne mogu da otvorim UDP port {port} (zauzet? pokrenut drugi host?): {e}"))?;
+    status::set_host(HostStatus::Waiting { port });
+    say(format!("Host sluša na UDP portu {port}. Čeka viewer-a..."));
     let mut buf = [0u8; 2048];
-    loop {
+    while !stop.load(Ordering::Relaxed) {
+        // Short timeout so a stop request is noticed quickly.
+        sock.set_read_timeout(Some(Duration::from_millis(250)))?;
         let (n, peer) = match sock.recv_from(&mut buf) {
             Ok(r) => r,
             Err(e) if proto::is_transient(&e) => continue,
@@ -44,48 +57,58 @@ pub fn run(port: u16, auto: Option<Permission>) -> Result<()> {
         if n < 2 || buf[0] != proto::HELLO {
             continue;
         }
-        let permission = match auto {
-            Some(p) => p,
-            None => ask_consent(peer)?,
-        };
+        say(format!("Zahtev za povezivanje sa {peer}."));
+        status::set_host(HostStatus::AwaitingConsent(peer));
+        // Tell the viewer its request arrived, so it shows "waiting for approval" instead of "no answer".
+        let _ = sock.send_to(&[proto::PENDING], peer);
+        let permission = ask(peer);
         if permission == Permission::Deny {
             let _ = sock.send_to(&[proto::BYE], peer);
-            continue;
+            say(format!("Odbijeno: {peer}."));
+        } else {
+            match session(&sock, peer, permission == Permission::Control, stop) {
+                Ok(()) => say(format!("Sesija sa {peer} je završena.")),
+                Err(e) => say(format!("Sesija sa {peer} nije uspela: {e:#}")),
+            }
         }
-        match session(&sock, peer, permission == Permission::Control) {
-            Ok(()) => println!("Session with {peer} ended."),
-            Err(e) => eprintln!("Session with {peer} failed: {e:#}"),
-        }
-        println!("Waiting for a viewer...");
+        // The viewer keeps repeating its HELLO while we are busy; forget those so it is not asked about twice.
+        sock.set_nonblocking(true)?;
+        while sock.recv_from(&mut buf).is_ok() {}
+        sock.set_nonblocking(false)?;
+        status::set_host(HostStatus::Waiting { port });
     }
+    say("Host je zaustavljen.");
+    Ok(())
 }
 
-fn ask_consent(peer: SocketAddr) -> Result<Permission> {
+/// Console prompt used by the CLI.
+pub fn ask_stdin(peer: SocketAddr) -> Permission {
     println!("\n{peer} wants to connect to this computer.");
     println!("  c = allow viewing AND control of mouse/keyboard");
     println!("  v = allow viewing only");
     println!("  anything else = refuse");
     let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(match line.trim().to_ascii_lowercase().as_str() {
+    let _ = std::io::stdin().read_line(&mut line);
+    match line.trim().to_ascii_lowercase().as_str() {
         "c" | "y" => Permission::Control,
         "v" => Permission::ViewOnly,
         _ => Permission::Deny,
-    })
+    }
 }
 
-fn session(sock: &UdpSocket, peer: SocketAddr, allow_control: bool) -> Result<()> {
+fn session(sock: &UdpSocket, peer: SocketAddr, allow_control: bool, stop: &AtomicBool) -> Result<()> {
     let cap = capture::Capturer::new()?;
     let tex = cap.frame_texture()?;
     let mut enc = encoder::Encoder::new(&cap.device, &cap.context, &tex, cap.width, cap.height, FPS, BITRATE)?;
     let info = proto::StreamInfo { width: cap.width, height: cap.height, fps: FPS, control: allow_control };
     sock.send_to(&info.encode(), peer)?;
-    println!(
-        "Streaming {}x{} @ {FPS} fps to {peer} ({})",
+    status::set_host(HostStatus::Streaming { peer, control: allow_control });
+    say(format!(
+        "Prenosim ekran ({}x{} @ {FPS} fps) ka {peer}: {}",
         cap.width,
         cap.height,
-        if allow_control { "view + control; Ctrl+Alt+Shift+F12 ends the session" } else { "view only" }
-    );
+        if allow_control { "gledanje i kontrola (hitni prekid: Ctrl+Alt+Shift+F12)" } else { "samo gledanje" }
+    ));
 
     let shared = Arc::new(Shared {
         want_keyframe: AtomicBool::new(false),
@@ -104,10 +127,11 @@ fn session(sock: &UdpSocket, peer: SocketAddr, allow_control: bool) -> Result<()
     let mut sent_bytes = 0usize;
     let result = (|| -> Result<()> {
         while !shared.stop.load(Ordering::Relaxed)
+            && !stop.load(Ordering::Relaxed)
             && proto::now_us().saturating_sub(shared.last_seen_us.load(Ordering::Relaxed)) < PEER_TIMEOUT_US
         {
             if allow_control && input::panic_hotkey_down() {
-                println!("Emergency hotkey pressed - ending the session.");
+                say("Hitni prekid (Ctrl+Alt+Shift+F12): sesija se završava.");
                 break;
             }
             let want_key = shared.want_keyframe.swap(false, Ordering::Relaxed);
@@ -139,13 +163,12 @@ fn session(sock: &UdpSocket, peer: SocketAddr, allow_control: bool) -> Result<()
 
     shared.stop.store(true, Ordering::Relaxed);
     let _ = control.join();
-    sock.set_read_timeout(None)?;
     let _ = sock.send_to(&[proto::BYE], peer);
-    println!(
+    console(format!(
         "Sent {frame_id} frames, {:.1} MB, {} chunks resent after NACK",
         sent_bytes as f64 / 1e6,
         shared.retransmitted.load(Ordering::Relaxed)
-    );
+    ));
     result
 }
 

@@ -1,108 +1,84 @@
 # Test na dva računara
 
-## Najlakši način: dvoklik na .bat fajlove
+Isti program, `remote-desk.exe`, pokreće se na **oba** računara. Jedan deli ekran (HOST), drugi ga gleda i
+upravlja njime (VIEWER). Instalacija nije potrebna; dovoljan je jedan fajl.
 
-U folderu `dist` su četiri fajla; kopiraj **sva četiri zajedno** u jedan folder na oba računara.
-Dvoklik na `remote-desk.exe` ne radi ništa korisno (program traži argument `host` ili `view`), zato postoje ovi fajlovi:
+## 1. Preuzmi program
 
-| Računar | Korak | Fajl |
-|---|---|---|
-| Host | 1, samo jednom: desni klik, **Run as administrator** | `1-dozvoli-firewall.bat` |
-| Host | 2: dvoklik. Ispiše IP adresu hosta i čeka | `2-pokreni-host.bat` |
-| Viewer | 3: dvoklik, upiši IP adresu hosta | `3-pokreni-viewer.bat` |
-| Host | 4: kad se viewer poveže, u prozoru hosta upiši `c` + Enter (kontrola) ili `v` + Enter (samo gledanje) | |
+Na drugi računar prenesi samo fajl **`dist\remote-desk.exe`** (7 MB), bilo kako:
 
-Dalje u ovom fajlu je isto to napisano komandama, uz tumačenje ispisa i rešavanje problema.
+- `git clone https://github.com/100lejeukuci/100desktops.git` pa uzmi `dist\remote-desk.exe`, ili kasnije `git pull`
+- na GitHub stranici repoa: **Code → Download ZIP**, pa raspakuj
+- USB / deljeni folder
 
----
+Na oba računara koristi **istu, novu verziju**. Windows SmartScreen može upozoriti jer program nije potpisan:
+klikni **More info → Run anyway**.
 
-Potreban je samo `dist\remote-desk.exe` (0,6 MB, bez instalacije). Ne pokreći host i viewer na istom računaru
-dok kontrolišeš miš: viewer bi hostu slao komande koje pomeraju njegov sopstveni miš.
+## 2. Računar koji deli ekran (HOST)
 
-## Uloge
+Host mora imati GPU sa hardverskim H.264 enkoderom (AMD, NVIDIA ili Intel). Računar na kome je ovo razvijeno
+(RX 6900 XT) je proveren.
 
-| Računar | Šta mu treba |
-|---|---|
-| **Host** (deli ekran) | Windows 10/11 sa GPU-om koji ima hardverski H.264 enkoder (AMD, NVIDIA ili Intel). Računar na kome je ovo napravljeno (RX 6900 XT) je provereno dobar. |
-| **Viewer** (gleda i kontroliše) | Bilo koji Windows 10/11 računar. Windows "N" izdanja traže "Media Feature Pack". |
+1. Dvoklik na `remote-desk.exe`. Gore piše **tvoja IP adresa** (npr. `192.168.100.72`). To je adresa koju upisuješ na viewer-u.
+2. Samo prvi put: u kartici HOST klikni **Dozvoli u firewall-u**, pa **Da** u Windows prozoru (UAC).
+   Status treba da pređe u „Firewall: dozvoljeno". Bez ovoga Windows blokira dolazne veze.
+3. Klikni **Pokreni hosting**. Status je „Čeka viewer-a na ...".
 
-Oba računara moraju biti na istoj mreži (isti ruter). Kablom je bolje nego Wi-Fi-jem; na Wi-Fi-ju proveri da ruter
-nema uključenu "AP/client isolation".
+## 3. Računar koji gleda i upravlja (VIEWER)
 
-## 1. Host: dozvoli dolazni UDP (jednom)
+1. Dvoklik na `remote-desk.exe`.
+2. U polje **HOST IP** upiši adresu koju host prikazuje (npr. `192.168.100.72`) i klikni **Poveži se**.
+   Status je „Host je primio zahtev. Na tom računaru treba da klikneš Dozvoli".
 
-Windows firewall blokira dolazni UDP dok ne dozvoliš. Otvori **PowerShell kao administrator** na hostu i pokreni:
+## 4. Opet na hostu: odobri vezu
 
-```powershell
-New-NetFirewallRule -DisplayName "Remote Desk test" -Direction Inbound -Protocol UDP -LocalPort 7000 -Action Allow
-```
+Prozor hosta iskoči sa pitanjem. Izaberi:
 
-Posle testa ukloni pravilo:
-
-```powershell
-Remove-NetFirewallRule -DisplayName "Remote Desk test"
-```
-
-## 2. Host: pokreni
-
-Kopiraj `remote-desk.exe` bilo gde na host i u PowerShell-u ili CMD-u pokreni:
-
-```
-remote-desk.exe host
-```
-
-Njegova IP adresa na ovoj mreži se vidi komandom `ipconfig` (red "IPv4 Address"). Na računaru na kome je ovo napravljeno je
-`192.168.100.72`.
-
-## 3. Viewer: poveži se
-
-Kopiraj `remote-desk.exe` na viewer (USB, deljeni folder...). Windows SmartScreen može upozoriti jer fajl nije
-potpisan: "More info" pa "Run anyway" (samo ako si ga sam preneo).
-
-```
-remote-desk.exe view 192.168.100.72:7000
-```
-
-## 4. Host: odobri
-
-Na hostu će se pojaviti pitanje. Upiši:
-
-- `c` + Enter: dozvoli gledanje i kontrolu miša/tastature
-- `v` + Enter: samo gledanje
-- bilo šta drugo: odbij
+- **Dozvoli gledanje i kontrolu**: viewer vidi ekran i upravlja mišem i tastaturom
+- **Dozvoli samo gledanje**
+- **Odbij**
 
 Viewer otvara prozor sa ekranom hosta. Miš i tastatura u tom prozoru upravljaju hostom.
 
-**Hitni prekid na hostu:** `Ctrl+Alt+Shift+F12` odmah završava sesiju. Sesiju završava i zatvaranje viewer prozora.
+- **Hitni prekid kontrole na hostu:** `Ctrl+Alt+Shift+F12`
+- Prekid sa viewer strane: dugme **Prekini**, ili zatvori prozor sa ekranom
+- Prekid sa host strane: dugme **Zaustavi hosting**
 
-## Šta gledati
+Oba računara mogu biti i host i viewer, isti program.
 
-Viewer ispisuje jedan red u sekundi:
+## Šta gledati i javiti
 
-```
-60 fps shown | 20.3 Mbit/s | capture->present (est.) p50 .. ms p99 .. ms | RTT .. ms | chunks NACKed N | frames given up N | keyframe req N | input unacked N
-```
+U kartici VIEWER, kad je povezan, vidi se:
 
-- **fps shown**: treba oko 60. Ekran koji se ne menja ne šalje kadrove, pa za test pusti video ili pomeraj prozor
-  (npr. https://www.testufo.com).
-- **capture->present (est.)**: procena kašnjenja od hvatanja do prikaza. Satovi dva računara nisu isti, pa je ovo procena
-  preko RTT-a i može biti netačna nekoliko ms (naročito na Wi-Fi-ju). RTT je pouzdan. Prva sekunda je uvek lošija.
-- **chunks NACKed** raste kad se gube paketi; **frames given up** i **keyframe req** treba da ostanu blizu 0.
-- **input unacked**: treba da bude 0 ili 1; ako raste, komande do hosta ne stižu.
+| Polje | Značenje | Dobro je |
+|---|---|---|
+| FPS | kadrova u sekundi | oko 60 (ekran koji se ne menja ne šalje kadrove; pusti video ili pomeraj prozor) |
+| Protok | Mbit/s | oko 20 |
+| Kašnjenje (proc.) | od hvatanja ekrana na hostu do prikaza; **procena** jer satovi dva računara nisu isti | što manje; na kablu nekoliko ms |
+| RTT | kružno kašnjenje mreže | na kablu ispod 1 ms |
 
-Kad probaš, javi mi: tip veze (kabl/Wi-Fi), fps, p50/p99 i RTT, i da li je kontrola "osećajna" (zaostaje li miš).
+Ispod toga: koliko paketa je moralo da se pošalje ponovo i koliko kadrova je odbačeno (treba da bude blizu 0).
+
+Kad probaš, javi: tip veze (kabl/Wi-Fi), FPS, kašnjenje, RTT, i da li miš „zaostaje". Ako nešto zapne, pošalji i
+tekst iz kartice **DNEVNIK**.
 
 ## Ako ne radi
 
-| Simptom | Verovatan uzrok |
+| Simptom | Šta uraditi |
 |---|---|
-| Viewer ostaje na "waiting for the host to approve" i na hostu se ništa ne pojavljuje | Zahtev ne stiže do hosta. Posle 5 s viewer ispiše savet: "reachable, but no host is listening" znači da je računar dostupan a host nije pokrenut na tom portu; "No answer" znači da ga firewall, pogrešna IP ili drugačija mreža blokiraju. Proveri redom: (1) host je pokrenut i IP koju upisuješ je tačno ona koju host ispisuje, (2) oba računara su na istoj mreži (prve tri cifre IP adrese iste, npr. 192.168.100.x; Wi-Fi "guest" mreža ili "AP isolation" blokira), (3) `1-dozvoli-firewall.bat` je pokrenut kao administrator **na računaru koji je host**, (4) u prozoru hosta pritisni Esc ako je neko kliknuo u njega |
-| Host kaže "no hardware H.264 encoder found" | GPU/drajver nema hardverski enkoder; zameni uloge ili ažuriraj drajver |
-| Viewer se otvori pa odmah zatvori | Pogledaj grešku u konzoli i pošalji mi je |
-| Sliku vidi, ali miš ne reaguje | Host je odgovorio `v`, ili je prozor kojim upravljaš u UAC/admin aplikaciji (to još ne radi) |
-| Kašnjenje veliko, mnogo NACK-ova | Wi-Fi sa lošim signalom; probaj kabl |
+| „Host je primio zahtev..." a na hostu nema dijaloga | Prozor hosta je minimizovan ili iza drugih; trebalo bi da iskoči sam. Proveri traku zadataka |
+| „Nema odgovora od ..." posle 5 s | Zahtev ne stiže do hosta: (1) host je pokrenut i IP je tačno ona koju host prikazuje, (2) oba računara su u istoj mreži (prve tri cifre IP adrese iste), Wi-Fi „guest" mreža i „AP isolation" blokiraju, (3) firewall na **hostu** je „dozvoljeno" |
+| „Računar odgovara, ali na tom portu ne radi remote-desk host" | IP je ispravna, ali host nije pokrenut ili je port drugačiji; proveri polje Port na oba računara |
+| Host: „ne mogu da otvorim UDP port" | Port je zauzet; zatvori drugi remote-desk ili promeni port (isti na oba računara) |
+| Host: „no hardware H.264 encoder found" | Taj računar nema hardverski enkoder; zameni uloge ili ažuriraj drajver grafičke |
+| Slika se vidi, ali miš ne reaguje | Host je izabrao „samo gledanje", ili upravljaš UAC/admin prozorom (još ne radi) |
+| Program se ne otvara uopšte | Pogledaj `%TEMP%\remote-desk-crash.log` i pošalji ga |
 
 ## Poznata ograničenja ove verzije
 
-Nema enkripcije ni provere identiteta (koristi samo na mreži kojoj veruješ), samo prvi monitor, tasteri Win/Alt+Tab/Ctrl+Alt+Del
-ostaju lokalni na viewer-u, a UAC prozori i login ekran se ne mogu kontrolisati.
+- Nema enkripcije ni provere identiteta; koristi samo na mreži kojoj veruješ.
+- Samo prvi monitor; ne prikazuje se kursor sa hosta (vidiš svoj lokalni kursor).
+- Win, Alt+Tab i Ctrl+Alt+Del ostaju lokalni na viewer-u; UAC prozori i login ekran se ne mogu kontrolisati.
+- Radi u istoj mreži; za internet treba još posla (signaling i NAT traversal).
+
+Komandna linija (`dist\remote-desk-cli.exe`) postoji za testove i skripte; za svakodnevno korišćenje nije potrebna.

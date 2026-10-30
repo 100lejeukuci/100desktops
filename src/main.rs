@@ -1,69 +1,31 @@
-mod capture;
-mod client;
-mod decoder;
-mod encoder;
-mod host;
-mod input;
-mod local;
-mod probe;
-mod proto;
-mod viewer;
+//! Remote Desk: the everyday app. One window, the same on both computers: your IP address, a HOST IP field
+//! to control another PC, and a button to share this one.
+//!
+//! Optional arguments (handy for testing): `--host` starts hosting on launch, `--connect <ip[:port]>` fills in
+//! the HOST IP field and connects, `--port <n>` sets the port.
 
-use anyhow::{Context, Result, bail};
-use std::net::{SocketAddr, ToSocketAddrs};
+#![windows_subsystem = "windows"]
 
-const USAGE: &str = "\
-Usage:
-  remote-desk local                              single-PC benchmark (no network)
-  remote-desk host [--port 7000]                 share this screen; asks whether to allow view + control, view only, or refuse
-                   [--yes [--view-only]]         answer that question automatically (tests only)
-  remote-desk view <host:port> [--seconds N] [--shot] [--drop PERCENT]
-  remote-desk probe [--seconds N]                test window that prints the input it receives
-";
+mod gui;
 
-/// A click in a console window starts "QuickEdit" text selection, which freezes any program that prints
-/// until a key is pressed. That would stall the host's consent prompt and the viewer's video loop.
-fn disable_quick_edit() {
-    use windows::Win32::System::Console::*;
-    unsafe {
-        if let Ok(input) = GetStdHandle(STD_INPUT_HANDLE) {
-            let mut mode = CONSOLE_MODE(0);
-            if GetConsoleMode(input, &mut mode).is_ok() {
-                let _ = SetConsoleMode(input, (mode & !ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
-            }
-        }
-    }
+fn install_panic_hook() {
+    // A windows-subsystem program has no console, so keep a record of crashes where the user can find it.
+    std::panic::set_hook(Box::new(|info| {
+        let path = std::env::temp_dir().join("remote-desk-crash.log");
+        let _ = std::fs::write(&path, format!("{info}\n"));
+        remote_desk::log::say(format!("Neočekivana greška: {info}"));
+    }));
 }
 
-fn main() -> Result<()> {
-    disable_quick_edit();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let flag = |name: &str| args.iter().any(|a| a == name);
-    let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
-    match args.first().map(String::as_str) {
-        Some("local") => local::run(),
-        Some("host") => {
-            let port = value("--port").map(|p| p.parse()).transpose().context("bad --port")?.unwrap_or(7000);
-            let auto = flag("--yes").then(|| {
-                if flag("--view-only") { host::Permission::ViewOnly } else { host::Permission::Control }
-            });
-            host::run(port, auto)
-        }
-        Some("view") => {
-            let target = args.get(1).context("missing host:port")?;
-            let addr: SocketAddr = target
-                .to_socket_addrs()
-                .context("bad host:port")?
-                .find(SocketAddr::is_ipv4)
-                .context("no IPv4 address for host")?;
-            let seconds = value("--seconds").map(|s| s.parse()).transpose().context("bad --seconds")?;
-            let drop_percent = value("--drop").map(|s| s.parse()).transpose().context("bad --drop")?.unwrap_or(0);
-            client::run(
-                addr,
-                client::Options { seconds, screenshot: flag("--shot"), drop_percent, script: flag("--script") },
-            )
-        }
-        Some("probe") => probe::run(value("--seconds").map(|s| s.parse()).transpose().context("bad --seconds")?.unwrap_or(15)),
-        _ => bail!("{USAGE}"),
-    }
+fn main() -> eframe::Result {
+    install_panic_hook();
+    let startup = gui::Startup::from_args(std::env::args().skip(1).collect());
+    let options = eframe::NativeOptions {
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title("Remote Desk")
+            .with_inner_size([580.0, 900.0])
+            .with_min_inner_size([500.0, 600.0]),
+        ..Default::default()
+    };
+    eframe::run_native("Remote Desk", options, Box::new(|cc| Ok(Box::new(gui::App::new(cc, startup)))))
 }

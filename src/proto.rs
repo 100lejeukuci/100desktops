@@ -23,6 +23,8 @@ pub const INPUT_MOVE: u8 = 9; // viewer -> host, unreliable: [INPUT_MOVE, seq u3
 pub const INPUT_EVENTS: u8 = 10; // viewer -> host, reliable: [INPUT_EVENTS, n u8, InputEvent * n]
 pub const INPUT_ACK: u8 = 11; // host -> viewer: [INPUT_ACK, next_expected_seq u32]
 
+pub const PENDING: u8 = 12; // host -> viewer: request received, the local user has not answered yet
+
 pub const VERSION: u8 = 1;
 pub const EVENT_SIZE: usize = 12;
 pub const MAX_EVENTS_PER_PACKET: usize = 80;

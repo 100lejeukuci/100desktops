@@ -1,5 +1,7 @@
 //! Viewer side: connects to a host, reassembles frames, decodes and displays them.
 
+use crate::log::{console, say};
+use crate::status::{self, Stats, ViewerStatus};
 use crate::{decoder, input, proto, viewer};
 use anyhow::{Result, bail};
 use std::net::SocketAddr;
@@ -70,24 +72,53 @@ fn script_steps(info: &proto::StreamInfo, win_w: u32, win_h: u32) -> Vec<(Durati
     ]
 }
 
-pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
+/// Clears the shared viewer status however `run` ends (success, error or cancel).
+struct ResetStatus;
+
+impl Drop for ResetStatus {
+    fn drop(&mut self) {
+        status::set_viewer(ViewerStatus::Off);
+        status::set_stats(status::NO_STATS);
+    }
+}
+
+/// Connect to `host` and show its screen until the window is closed, the host ends the session,
+/// or `cancel` is set (the GUI's Disconnect button).
+pub fn run(host: SocketAddr, opts: Options, cancel: &AtomicBool) -> Result<()> {
+    let _reset = ResetStatus;
+    status::set_viewer(ViewerStatus::Connecting { host, hint: None });
     let sock = proto::bind(SocketAddr::from(([0, 0, 0, 0], 0)))?;
     sock.connect(host)?;
 
     // --- handshake: repeat HELLO until the host (and its user) accepts
     sock.set_read_timeout(Some(Duration::from_millis(500)))?;
-    println!("Connecting to {host} - waiting for the host to approve...");
+    say(format!("Povezivanje na {host} - čekam da host odobri vezu..."));
     let started = Instant::now();
     let mut buf = [0u8; 2048];
     let mut port_closed = false; // ICMP "port unreachable" seen: the PC answers but nothing listens on the port
     let mut last_hint = Instant::now();
+    let mut pending_seen = false; // the host confirmed it got our request and is waiting for its user
     let info = loop {
-        if started.elapsed() > Duration::from_secs(60) {
-            bail!("host did not answer within 60 s");
+        if cancel.load(Ordering::Relaxed) {
+            say("Povezivanje je prekinuto.");
+            return Ok(());
+        }
+        if started.elapsed() > Duration::from_secs(120) {
+            bail!("host nije odgovorio u roku od 120 s");
         }
         let _ = sock.send(&[proto::HELLO, proto::VERSION]);
         match sock.recv(&mut buf) {
-            Ok(_) if buf[0] == proto::BYE => bail!("host declined the connection"),
+            Ok(_) if buf[0] == proto::BYE => bail!("host je odbio vezu"),
+            Ok(_) if buf[0] == proto::PENDING => {
+                if !pending_seen {
+                    say("Host je primio zahtev i čeka da korisnik na tom računaru odobri vezu.");
+                }
+                pending_seen = true;
+                status::set_viewer(ViewerStatus::Connecting {
+                    host,
+                    hint: Some("Host je primio zahtev. Na tom računaru treba da klikneš „Dozvoli“.".into()),
+                });
+            }
             Ok(n) => {
                 if let Some(info) = proto::StreamInfo::decode(&buf[..n]) {
                     break info;
@@ -100,29 +131,37 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
             Err(e) if proto::is_transient(&e) => {} // plain timeout: the 500 ms read timeout paces the retries
             Err(e) => return Err(e.into()),
         }
-        if last_hint.elapsed() >= Duration::from_secs(5) {
+        if last_hint.elapsed() >= Duration::from_secs(5) && !pending_seen {
             last_hint = Instant::now();
-            if port_closed {
-                println!(
-                    "  {host} is reachable, but no remote-desk host is listening on that port. \
-                     Start 2-pokreni-host.bat on that PC and check that the IP and port are right."
-                );
+            let hint = if port_closed {
+                format!(
+                    "Računar {host} odgovara, ali na tom portu ne radi remote-desk host. \
+                     Na tom računaru pokreni „Pokreni hosting“ i proveri da su IP adresa i port tačni."
+                )
             } else {
-                println!(
-                    "  No answer from {host} yet. Check: (1) the host is running and prints exactly this IP, \
-                     (2) both PCs are on the same network, (3) 1-dozvoli-firewall.bat was run as administrator on the host, \
-                     (4) the host window is not paused - click it and press Esc."
-                );
-            }
+                format!(
+                    "Nema odgovora od {host}. Proveri: (1) host je pokrenut i IP adresa je tačno ona koju host prikazuje, \
+                     (2) oba računara su u istoj mreži, (3) firewall na hostu dozvoljava UDP port \
+                     (dugme „Dozvoli u firewall-u“ na hostu), (4) host čeka na tvoju vezu."
+                )
+            };
+            say(&hint);
+            status::set_viewer(ViewerStatus::Connecting { host, hint: Some(hint) });
         }
     };
-    println!(
-        "Connected: {}x{} @ {} fps, {}",
+    say(format!(
+        "Povezan na {host}: {}x{} @ {} fps, {}",
         info.width,
         info.height,
         info.fps,
-        if info.control { "remote control allowed" } else { "view only" }
-    );
+        if info.control { "kontrola dozvoljena" } else { "samo gledanje" }
+    ));
+    status::set_viewer(ViewerStatus::Connected {
+        host,
+        width: info.width,
+        height: info.height,
+        control: info.control,
+    });
 
     // --- local GPU objects
     let (device, context) = viewer::create_device()?;
@@ -208,6 +247,8 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
         })
     };
 
+    let stop_guard = StopOnDrop { stop: stop.clone(), sock: sock.try_clone()? };
+
     // --- main loop: decode + present on the thread that owns the window
     let mut need_keyframe = true;
     let mut last_keyframe_req = Instant::now() - Duration::from_secs(1);
@@ -223,7 +264,11 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
     let mut script_next = 0;
     let session_start = Instant::now();
 
-    while window.pump() && !stop.load(Ordering::Relaxed) && deadline.is_none_or(|d| started.elapsed() < d) {
+    while window.pump()
+        && !stop.load(Ordering::Relaxed)
+        && !cancel.load(Ordering::Relaxed)
+        && deadline.is_none_or(|d| started.elapsed() < d)
+    {
         // --- remote control: window input (or the test script) -> protocol events
         let mut raw_input = window.take_input();
         while script_next < script.len() && session_start.elapsed() >= script[script_next].0 {
@@ -290,16 +335,26 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
             let total = rx_bytes.load(Ordering::Relaxed);
             latencies.sort_unstable();
             let pct = |p: f64| latencies.get(((latencies.len().max(1) - 1) as f64 * p) as usize).copied().unwrap_or(0);
-            println!(
+            let snapshot = Stats {
+                fps: (shown as f64 / secs) as f32,
+                mbps: ((total - last_rx_bytes) as f64 * 8.0 / secs / 1e6) as f32,
+                latency_p50_ms: (pct(0.5) as f64 / 1000.0) as f32,
+                latency_p99_ms: (pct(0.99) as f64 / 1000.0) as f32,
+                rtt_ms: (rtt_us.load(Ordering::Relaxed) as f64 / 1000.0) as f32,
+                nacks: nacks_sent.load(Ordering::Relaxed),
+                frames_given_up: lost_frames,
+            };
+            status::set_stats(snapshot);
+            console(format!(
                 "{:>3} fps shown | {:>5.1} Mbit/s | capture->present (est.) p50 {:.1} ms p99 {:.1} ms | RTT {:.1} ms | chunks NACKed {} | frames given up {lost_frames} | keyframe req {keyframe_reqs} | input unacked {}",
-                (shown as f64 / secs).round(),
-                (total - last_rx_bytes) as f64 * 8.0 / secs / 1e6,
-                pct(0.5) as f64 / 1000.0,
-                pct(0.99) as f64 / 1000.0,
-                rtt_us.load(Ordering::Relaxed) as f64 / 1000.0,
-                nacks_sent.load(Ordering::Relaxed),
+                snapshot.fps.round(),
+                snapshot.mbps,
+                snapshot.latency_p50_ms,
+                snapshot.latency_p99_ms,
+                snapshot.rtt_ms,
+                snapshot.nacks,
                 sender.pending(),
-            );
+            ));
             last_rx_bytes = total;
             shown = 0;
             latencies.clear();
@@ -307,8 +362,25 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
         }
     }
 
-    stop.store(true, Ordering::Relaxed);
-    let _ = sock.send(&[proto::BYE]);
+    if stop.load(Ordering::Relaxed) && !cancel.load(Ordering::Relaxed) {
+        say("Host je prekinuo sesiju.");
+    } else {
+        say("Veza je prekinuta.");
+    }
+    drop(stop_guard);
     let _ = rx_thread.join();
     Ok(())
+}
+
+/// Stops the receive thread and tells the host goodbye, also when `run` bails out early with an error.
+struct StopOnDrop {
+    stop: Arc<AtomicBool>,
+    sock: std::net::UdpSocket,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.sock.send(&[proto::BYE]);
+    }
 }
