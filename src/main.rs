@@ -21,7 +21,22 @@ Usage:
   remote-desk probe [--seconds N]                test window that prints the input it receives
 ";
 
+/// A click in a console window starts "QuickEdit" text selection, which freezes any program that prints
+/// until a key is pressed. That would stall the host's consent prompt and the viewer's video loop.
+fn disable_quick_edit() {
+    use windows::Win32::System::Console::*;
+    unsafe {
+        if let Ok(input) = GetStdHandle(STD_INPUT_HANDLE) {
+            let mut mode = CONSOLE_MODE(0);
+            if GetConsoleMode(input, &mut mode).is_ok() {
+                let _ = SetConsoleMode(input, (mode & !ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    disable_quick_edit();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().any(|a| a == name);
     let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));

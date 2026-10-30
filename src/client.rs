@@ -79,6 +79,8 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
     println!("Connecting to {host} - waiting for the host to approve...");
     let started = Instant::now();
     let mut buf = [0u8; 2048];
+    let mut port_closed = false; // ICMP "port unreachable" seen: the PC answers but nothing listens on the port
+    let mut last_hint = Instant::now();
     let info = loop {
         if started.elapsed() > Duration::from_secs(60) {
             bail!("host did not answer within 60 s");
@@ -91,8 +93,27 @@ pub fn run(host: SocketAddr, opts: Options) -> Result<()> {
                     break info;
                 }
             }
-            Err(e) if proto::is_transient(&e) => std::thread::sleep(Duration::from_millis(500)),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                port_closed = true;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) if proto::is_transient(&e) => {} // plain timeout: the 500 ms read timeout paces the retries
             Err(e) => return Err(e.into()),
+        }
+        if last_hint.elapsed() >= Duration::from_secs(5) {
+            last_hint = Instant::now();
+            if port_closed {
+                println!(
+                    "  {host} is reachable, but no remote-desk host is listening on that port. \
+                     Start 2-pokreni-host.bat on that PC and check that the IP and port are right."
+                );
+            } else {
+                println!(
+                    "  No answer from {host} yet. Check: (1) the host is running and prints exactly this IP, \
+                     (2) both PCs are on the same network, (3) 1-dozvoli-firewall.bat was run as administrator on the host, \
+                     (4) the host window is not paused - click it and press Esc."
+                );
+            }
         }
     };
     println!(

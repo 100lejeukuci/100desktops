@@ -96,7 +96,7 @@ Kad probaš, javi mi: tip veze (kabl/Wi-Fi), fps, p50/p99 i RTT, i da li je kont
 
 | Simptom | Verovatan uzrok |
 |---|---|
-| Viewer ostaje na "waiting for the host to approve" | Firewall na hostu (korak 1), pogrešna IP, ili host nije pokrenut. Proveri iz viewera: `Test-NetConnection 192.168.100.72` |
+| Viewer ostaje na "waiting for the host to approve" i na hostu se ništa ne pojavljuje | Zahtev ne stiže do hosta. Posle 5 s viewer ispiše savet: "reachable, but no host is listening" znači da je računar dostupan a host nije pokrenut na tom portu; "No answer" znači da ga firewall, pogrešna IP ili drugačija mreža blokiraju. Proveri redom: (1) host je pokrenut i IP koju upisuješ je tačno ona koju host ispisuje, (2) oba računara su na istoj mreži (prve tri cifre IP adrese iste, npr. 192.168.100.x; Wi-Fi "guest" mreža ili "AP isolation" blokira), (3) `1-dozvoli-firewall.bat` je pokrenut kao administrator **na računaru koji je host**, (4) u prozoru hosta pritisni Esc ako je neko kliknuo u njega |
 | Host kaže "no hardware H.264 encoder found" | GPU/drajver nema hardverski enkoder; zameni uloge ili ažuriraj drajver |
 | Viewer se otvori pa odmah zatvori | Pogledaj grešku u konzoli i pošalji mi je |
 | Sliku vidi, ali miš ne reaguje | Host je odgovorio `v`, ili je prozor kojim upravljaš u UAC/admin aplikaciji (to još ne radi) |
