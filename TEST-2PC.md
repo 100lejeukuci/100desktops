@@ -1,5 +1,21 @@
 # Test na dva računara
 
+## Najlakši način: dvoklik na .bat fajlove
+
+U folderu `dist` su četiri fajla; kopiraj **sva četiri zajedno** u jedan folder na oba računara.
+Dvoklik na `remote-desk.exe` ne radi ništa korisno (program traži argument `host` ili `view`), zato postoje ovi fajlovi:
+
+| Računar | Korak | Fajl |
+|---|---|---|
+| Host | 1, samo jednom: desni klik, **Run as administrator** | `1-dozvoli-firewall.bat` |
+| Host | 2: dvoklik. Ispiše IP adresu hosta i čeka | `2-pokreni-host.bat` |
+| Viewer | 3: dvoklik, upiši IP adresu hosta | `3-pokreni-viewer.bat` |
+| Host | 4: kad se viewer poveže, u prozoru hosta upiši `c` + Enter (kontrola) ili `v` + Enter (samo gledanje) | |
+
+Dalje u ovom fajlu je isto to napisano komandama, uz tumačenje ispisa i rešavanje problema.
+
+---
+
 Potreban je samo `dist\remote-desk.exe` (0,6 MB, bez instalacije). Ne pokreći host i viewer na istom računaru
 dok kontrolišeš miš: viewer bi hostu slao komande koje pomeraju njegov sopstveni miš.
 
