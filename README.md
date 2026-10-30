@@ -60,8 +60,8 @@ Izlaz je `target/release/remote-desk.exe` (GUI) i `target/release/remote-desk-cl
 
 ## Ograničenja
 
-- **Nema enkripcije ni provere identiteta.** Koristi samo na mreži kojoj veruješ.
+- **Nema enkripcije ni provere identiteta u samom programu.** Koristi samo na mreži kojoj veruješ ili kroz Tailscale; ne otvaraj port na ruteru.
 - Samo prvi monitor; nema prikaza kursora sa hosta; nema zvuka, clipboard-a ni prenosa fajlova.
 - Win, Alt+Tab i Ctrl+Alt+Del ostaju lokalni na viewer-u. UAC prozori i login ekran se ne mogu kontrolisati
   (za to treba Windows servis).
-- Radi samo u istoj mreži; za internet treba signaling server i NAT traversal (STUN/TURN).
+- Preko interneta radi kroz Tailscale (besplatan VPN, na oba računara, isti nalog); aplikacija prepoznaje Tailscale adresu `100.x.x.x` i prikazuje je u kartici INTERNET. Ugrađeni NAT traversal (STUN/TURN) i šifrovanje tek treba napraviti.

@@ -14,6 +14,18 @@ Na drugi računar prenesi samo fajl **`dist\remote-desk.exe`** (7 MB), bilo kako
 Na oba računara koristi **istu, novu verziju**. Windows SmartScreen može upozoriti jer program nije potpisan:
 klikni **More info → Run anyway**.
 
+## Računari NISU u istoj mreži? Prvo ovo (Tailscale)
+
+Adresa tipa `192.168.x.x` važi samo iza jednog rutera. Za vezu preko interneta koristi Tailscale: besplatan je,
+šifruje saobraćaj i ne traži podešavanje rutera.
+
+1. Na **oba** računara instaliraj Tailscale (<https://tailscale.com/download/windows>), ili klikni **Preuzmi Tailscale** u kartici INTERNET.
+2. Na **oba** se prijavi **istim nalogom** (npr. Google nalog).
+3. U Remote Desk klikni **Osveži**. U kartici INTERNET se pojavi adresa `100.x.x.x`: to je adresa za internet.
+4. Dalje je isto kao dole, samo što se umesto LAN adrese koristi **Tailscale adresa hosta** (`100.x.x.x`).
+
+Ako Tailscale radi a veza ne stiže, proveri da je u kartici HOST firewall „dozvoljeno".
+
 ## 2. Računar koji deli ekran (HOST)
 
 Host mora imati GPU sa hardverskim H.264 enkoderom (AMD, NVIDIA ili Intel). Računar na kome je ovo razvijeno
@@ -67,7 +79,7 @@ tekst iz kartice **DNEVNIK**.
 | Simptom | Šta uraditi |
 |---|---|
 | „Host je primio zahtev..." a na hostu nema dijaloga | Prozor hosta je minimizovan ili iza drugih; trebalo bi da iskoči sam. Proveri traku zadataka |
-| „Nema odgovora od ..." posle 5 s | Zahtev ne stiže do hosta: (1) host je pokrenut i IP je tačno ona koju host prikazuje, (2) oba računara su u istoj mreži (prve tri cifre IP adrese iste), Wi-Fi „guest" mreža i „AP isolation" blokiraju, (3) firewall na **hostu** je „dozvoljeno" |
+| „Nema odgovora od ..." posle 5 s | Zahtev ne stiže do hosta: (1) host je pokrenut i IP je tačno ona koju host prikazuje, (2) oba računara su u istoj mreži (prve tri cifre IP adrese iste) **ili** koristiš Tailscale adrese `100.x.x.x` (vidi gore); Wi-Fi „guest" mreža i „AP isolation" blokiraju, (3) firewall na **hostu** je „dozvoljeno" |
 | „Računar odgovara, ali na tom portu ne radi remote-desk host" | IP je ispravna, ali host nije pokrenut ili je port drugačiji; proveri polje Port na oba računara |
 | Host: „ne mogu da otvorim UDP port" | Port je zauzet; zatvori drugi remote-desk ili promeni port (isti na oba računara) |
 | Host: „no hardware H.264 encoder found" | Taj računar nema hardverski enkoder; zameni uloge ili ažuriraj drajver grafičke |
@@ -76,9 +88,9 @@ tekst iz kartice **DNEVNIK**.
 
 ## Poznata ograničenja ove verzije
 
-- Nema enkripcije ni provere identiteta; koristi samo na mreži kojoj veruješ.
+- Sam program nema enkripciju ni proveru identiteta; preko interneta ga koristi samo kroz Tailscale (on šifruje vezu). Ne otvaraj port na ruteru.
 - Samo prvi monitor; ne prikazuje se kursor sa hosta (vidiš svoj lokalni kursor).
 - Win, Alt+Tab i Ctrl+Alt+Del ostaju lokalni na viewer-u; UAC prozori i login ekran se ne mogu kontrolisati.
-- Radi u istoj mreži; za internet treba još posla (signaling i NAT traversal).
+- Internet: radi preko Tailscale-a (potreban je na oba računara). Ugrađeni NAT traversal i šifrovanje u samom programu su sledeći korak.
 
 Komandna linija (`dist\remote-desk-cli.exe`) postoji za testove i skripte; za svakodnevno korišćenje nije potrebna.

@@ -68,6 +68,7 @@ enum Action {
     Disconnect,
     RefreshIps,
     Copy(String),
+    OpenUrl(&'static str),
     AllowFirewall,
     Answer(Permission),
 }
@@ -83,7 +84,7 @@ pub struct App {
     consent_rx: Receiver<ConsentRequest>,
     pending_consent: Option<ConsentRequest>,
     form_error: Option<String>,
-    copied_at: Option<Instant>,
+    copied: Option<(String, Instant)>,
     firewall_ok: Arc<Mutex<Option<bool>>>,
     firewall_note: Option<String>,
 }
@@ -104,7 +105,7 @@ impl App {
             consent_rx,
             pending_consent: None,
             form_error: None,
-            copied_at: None,
+            copied: None,
             firewall_ok: Arc::new(Mutex::new(None)),
             firewall_note: None,
         };
@@ -123,8 +124,25 @@ impl App {
         self.port_input.trim().parse().ok().filter(|p| *p > 0)
     }
 
+    /// The address on the local network (never the Tailscale one).
     fn primary_ip_text(&self) -> String {
-        self.ips.first().map(|ip| ip.to_string()).unwrap_or_else(|| "nepoznata".into())
+        self.ips
+            .iter()
+            .find(|ip| !netinfo::is_tailscale(ip))
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "nepoznata".into())
+    }
+
+    /// This PC's Tailscale address, when Tailscale is installed, signed in and connected.
+    fn tailscale_ip(&self) -> Option<Ipv4Addr> {
+        self.ips.iter().copied().find(netinfo::is_tailscale)
+    }
+
+    fn copy_button(&self, ui: &mut egui::Ui, text: &str, action: &mut Option<Action>) {
+        let copied = self.copied.as_ref().is_some_and(|(t, at)| t == text && at.elapsed() < Duration::from_millis(1500));
+        if ui.add(secondary_button(if copied { "Kopirano" } else { "Kopiraj" })).clicked() {
+            *action = Some(Action::Copy(text.to_string()));
+        }
     }
 
     // ------------------------------------------------------------------ host
@@ -275,9 +293,10 @@ impl App {
                 self.check_firewall();
             }
             Action::Copy(text) => {
-                self.ctx.copy_text(text);
-                self.copied_at = Some(Instant::now());
+                self.ctx.copy_text(text.clone());
+                self.copied = Some((text, Instant::now()));
             }
+            Action::OpenUrl(url) => open_url(url),
             Action::AllowFirewall => self.allow_firewall(),
             Action::Answer(p) => {
                 if let Some(req) = self.pending_consent.take() {
@@ -319,6 +338,8 @@ impl eframe::App for App {
                 ui.add_space(12.0);
                 self.this_pc_card(ui, &mut action);
                 ui.add_space(12.0);
+                self.internet_card(ui, &mut action);
+                ui.add_space(12.0);
                 self.host_card(ui, &mut action);
                 ui.add_space(12.0);
                 self.viewer_card(ui, &mut action);
@@ -359,19 +380,20 @@ impl App {
                     if ui.add(secondary_button("Osveži")).clicked() {
                         *action = Some(Action::RefreshIps);
                     }
-                    let copied = self.copied_at.is_some_and(|t| t.elapsed() < Duration::from_millis(1500));
-                    let label = if copied { "Kopirano" } else { "Kopiraj" };
-                    if ui.add(secondary_button(label)).clicked() {
-                        *action = Some(Action::Copy(self.primary_ip_text()));
-                    }
+                    self.copy_button(ui, &self.primary_ip_text(), action);
                 });
             });
-            if self.ips.len() > 1 {
-                let others: Vec<String> = self.ips.iter().skip(1).map(|ip| ip.to_string()).collect();
+            let others: Vec<String> = self
+                .ips
+                .iter()
+                .filter(|ip| !netinfo::is_tailscale(ip) && ip.to_string() != self.primary_ip_text())
+                .map(|ip| ip.to_string())
+                .collect();
+            if !others.is_empty() {
                 ui.label(RichText::new(format!("Ostale adrese: {}", others.join(", "))).size(12.5).color(MUTED));
             }
             ui.label(
-                RichText::new("Ovu adresu upiši u polje „HOST IP“ na drugom računaru kad ovaj deli ekran.")
+                RichText::new("Ova adresa važi samo ako su oba računara u istoj mreži (isti ruter/WiFi). Za vezu preko interneta koristi karticu ispod.")
                     .size(12.5)
                     .color(MUTED),
             );
@@ -391,6 +413,57 @@ impl App {
         });
     }
 
+    fn internet_card(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
+        card(ui, "INTERNET", "Veza između različitih mreža", |ui| {
+            if let Some(ts) = self.tailscale_ip() {
+                status_line(ui, GREEN, "Tailscale je povezan");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(ts.to_string()).monospace().size(26.0).strong().color(TEXT));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        self.copy_button(ui, &ts.to_string(), action);
+                    });
+                });
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Ako ovaj računar deli ekran: ovu adresu upiši u „HOST IP“ na drugom računaru. \
+                             Ako gledaš drugi računar: u „HOST IP“ upiši Tailscale adresu koja piše na njemu. \
+                             Na oba računara mora da radi Tailscale, prijavljen istim nalogom.",
+                        )
+                        .size(12.5)
+                        .color(MUTED),
+                    )
+                    .wrap(),
+                );
+            } else {
+                status_line(ui, AMBER, "Tailscale nije pronađen na ovom računaru");
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Računari koji nisu na istoj mreži povezuju se preko Tailscale-a (besplatan, šifrovan, bez podešavanja rutera):\n\
+                             1. Instaliraj Tailscale na OBA računara.\n\
+                             2. Prijavi se ISTIM nalogom na oba.\n\
+                             3. Klikni „Osveži“ — ovde će se pojaviti adresa 100.x.x.x.\n\
+                             4. Host pokreće hosting; viewer upisuje Tailscale adresu hosta u „HOST IP“.",
+                        )
+                        .size(12.5)
+                        .color(MUTED),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    if ui.add(primary_button("Preuzmi Tailscale")).clicked() {
+                        *action = Some(Action::OpenUrl("https://tailscale.com/download/windows"));
+                    }
+                    if ui.add(secondary_button("Osveži")).clicked() {
+                        *action = Some(Action::RefreshIps);
+                    }
+                });
+            }
+        });
+    }
+
     fn host_card(&mut self, ui: &mut egui::Ui, action: &mut Option<Action>) {
         card(ui, "HOST", "Deli ekran ovog računara", |ui| {
             let running = self.host_running();
@@ -399,7 +472,8 @@ impl App {
                 _ if stopping => (AMBER, "Zaustavljanje...".to_string()),
                 HostStatus::Off => (IDLE, "Isključen".to_string()),
                 HostStatus::Waiting { port } => {
-                    (GREEN, format!("Čeka viewer-a na {}:{port}", self.primary_ip_text()))
+                    let addr = self.tailscale_ip().map(|ip| ip.to_string()).unwrap_or_else(|| self.primary_ip_text());
+                    (GREEN, format!("Čeka viewer-a na {addr}:{port}"))
                 }
                 HostStatus::AwaitingConsent(peer) => (AMBER, format!("Zahtev od {peer} čeka tvoj odgovor")),
                 HostStatus::Streaming { peer, control } => (
@@ -450,7 +524,7 @@ impl App {
                 let field = ui.add_enabled(
                     !busy,
                     egui::TextEdit::singleline(&mut self.host_ip_input)
-                        .hint_text("npr. 192.168.100.72")
+                        .hint_text("npr. 100.101.102.103 (Tailscale) ili 192.168.1.20 (ista mreža)")
                         .font(egui::TextStyle::Monospace)
                         .desired_width(ui.available_width() - 130.0),
                 );
@@ -463,6 +537,21 @@ impl App {
                     *action = Some(Action::Connect);
                 }
             });
+            if let Ok(target) = self.host_ip_input.trim().parse::<Ipv4Addr>() {
+                if netinfo::unreachable_lan_target(&target, &self.ips) {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Ovo je adresa iz druge lokalne mreže — neće raditi ako host nije na istom ruteru. \
+                                 Za vezu preko interneta upiši Tailscale adresu hosta (100.x.x.x), vidi karticu INTERNET.",
+                            )
+                            .size(12.5)
+                            .color(AMBER),
+                        )
+                        .wrap(),
+                    );
+                }
+            }
             ui.add_space(4.0);
 
             match status::viewer() {
@@ -640,6 +729,16 @@ fn parse_target(input: &str, default_port: u16) -> Result<SocketAddr, String> {
         return Ok(SocketAddr::new(ip.into(), default_port));
     }
     Err("Neispravna IP adresa. Primer: 192.168.100.72".into())
+}
+
+/// Open a web page in the default browser.
+fn open_url(url: &'static str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{HSTRING, w};
+    unsafe {
+        ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL);
+    }
 }
 
 fn settings_path() -> Option<PathBuf> {
